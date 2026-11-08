@@ -399,7 +399,13 @@ async function submitMissionPhoto(chatId: number, firstName?: string, username?:
     return;
   }
   const tgId = String(chatId);
-  const label = userLabel({ firstName, username, tgId });
+  // برچسب کامل کاربر: نام + یوزرنیم + آیدی عددی — اگر پیام زنده یوزرنیم نداشت از دیتابیس پر می‌شود
+  const dbu = await getUserByTg(tgId).catch(() => null);
+  const label = userLabel({
+    firstName: firstName ?? dbu?.firstName,
+    username: username ?? dbu?.username,
+    tgId,
+  });
   const sub = await p.submission.create({
     data: {
       type: 'mission',
@@ -603,7 +609,13 @@ async function submitPurchaseReceipt(chatId: number, firstName?: string, usernam
   }
   const { p, userLabel } = await import('./wifto-db');
   const tgId = String(chatId);
-  const label = userLabel({ firstName, username, tgId });
+  // برچسب کامل کاربر: نام + یوزرنیم + آیدی عددی — اگر پیام زنده یوزرنیم نداشت از دیتابیس پر می‌شود
+  const dbu = await getUserByTg(tgId).catch(() => null);
+  const label = userLabel({
+    firstName: firstName ?? dbu?.firstName,
+    username: username ?? dbu?.username,
+    tgId,
+  });
   const sub = await p.submission.create({
     data: {
       type: 'purchase',
@@ -656,12 +668,13 @@ async function submitPurchaseReceipt(chatId: number, firstName?: string, usernam
 // ---------- حساب کاربری ----------
 async function sendAccount(chatId: number, firstName?: string, username?: string) {
   const u = await getUserByTg(String(chatId));
+  const un = username || u?.username || null; // یوزرنیم زنده یا ذخیره‌شده در دیتابیس
   await sendMessage(
     chatId,
     `👤 حساب کاربری
 
 👤 نام: ${u?.firstName || firstName || '—'}
-🆔 آیدی عددی: ${chatId}${username ? `\n🔗 یوزرنیم: @${username}` : ''}
+🆔 آیدی عددی: ${chatId}${un ? `\n🔗 یوزرنیم: @${un}` : ''}
 💎 امتیاز: ${fmtNum(u?.points ?? 0)}
 🎯 شرکت در قرعه‌کشی‌ها: ${fmtNum(u?.lotteries ?? 0)} بار
 🏆 برنده شدن: ${fmtNum(u?.wins ?? 0)} بار${u?.phone ? `\n📱 شماره: ${u.phone}` : ''}`,
@@ -703,7 +716,7 @@ async function submitPhone(chatId: number) {
     await sendMessage(chatId, '⏳ مهلت این درخواست گذشت — لطفاً دوباره شماره‌ت رو بفرست 🙏', MAIN_KEYBOARD);
     return;
   }
-  const { p } = await import('./wifto-db');
+  const { p, userLabel } = await import('./wifto-db');
   const tgId = String(chatId);
   await p.botUser.update({ where: { tgId }, data: { phone: st.phone } }).catch(() => {});
   // آخرین ارسالیِ تاییدشدهِ در انتظار شماره را پیدا کن (برای مرجع)
@@ -714,13 +727,14 @@ async function submitPhone(chatId: number) {
   if (sub && !sub.phone) {
     await p.submission.update({ where: { id: sub.id }, data: { phone: st.phone } });
   }
+  const dbu = await p.botUser.findUnique({ where: { tgId } }).catch(() => null); // نام + یوزرنیم + آیدی
   await tgAdmin(
     'sendMessage',
     {
       chat_id: OWNER_CHAT_ID,
       text:
         `📞 شماره تلفن کاربر برای فعال‌سازی اینترنت:\n\n` +
-        `👤 ${sub?.userLabel ?? tgId}\n` +
+        `👤 ${dbu ? userLabel(dbu) : (sub?.userLabel ?? `🆔 ${tgId}`)}\n` +
         `📱 شماره: ${st.phone}\n` +
         (sub?.missionTitle ? `🎯 ماموریت: ${sub.missionTitle}\n` : '') +
         `⏰ ${faTime(new Date())}`,

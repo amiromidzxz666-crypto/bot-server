@@ -324,6 +324,15 @@ async function drawWinner(lotteryId: string, winnerTgId?: string) {
 }
 
 // ---------- ارسالی‌ها ----------
+/** برچسب کامل و تازه کاربر (نام + @یوزرنیم + آیدی عددی) — از دیتابیس؛ اگر کاربر در دیتابیس نبود از لیبل ذخیره‌شده */
+async function userLabelFresh(userTgId: string, stored?: string): Promise<string> {
+  try {
+    const wu = await p.botUser.findUnique({ where: { tgId: userTgId } });
+    if (wu) return userLabel(wu);
+  } catch {}
+  return stored ?? `🆔 ${userTgId}`;
+}
+
 function subCaption(
   sub: {
     type: string;
@@ -367,12 +376,13 @@ async function submissionsPanel(chatId: number) {
   else {
     for (const s of subs) {
       const icon = s.status === 'approved' ? '✅' : s.status === 'rejected' ? '❌' : '⏳';
-      text += `${icon} ${s.type === 'purchase' ? '💎 خرید' : '🎯 ماموریت'} — ${s.userLabel.split(' — ')[0]} — ${faTime(s.createdAt)}\n`;
+      const label = await userLabelFresh(s.userTgId, s.userLabel); // نام + @یوزرنیم + آیدی عددی
+      text += `${icon} ${s.type === 'purchase' ? '💎 خرید' : '🎯 ماموریت'} — ${label} — ${faTime(s.createdAt)}\n`;
       // برای ارسالی‌های در انتظار، دکمه نمایش مجدد عکس (اگر پیام عکس حذف/نرسیده باشد)
       if (s.status === 'pending')
         viewRows.push([
           {
-            text: `🖼 نمایش عکس — ${s.type === 'purchase' ? '💎 خرید' : '🎯 ماموریت'} (${s.userLabel.split(' — ')[0]})`,
+            text: `🖼 نمایش عکس — ${s.type === 'purchase' ? '💎 خرید' : '🎯 ماموریت'} (${label.split(' — ')[0]})`,
             callback_data: `s_view:${s.id}`,
           },
         ]);
@@ -383,12 +393,13 @@ async function submissionsPanel(chatId: number) {
 }
 
 /** بروزرسانی کپشن پیام عکس در چت مدیر بعد از تایید/لغو */
-async function updateSubmissionMessage(sub: { id: string; adminMsgId?: number | null; status: string; awardMode?: string | null; awardedPoints?: number | null; phone?: string | null; type: string; userLabel: string; missionTitle?: string | null; requestedPoints?: number | null; createdAt: Date }) {
+async function updateSubmissionMessage(sub: { id: string; userTgId: string; adminMsgId?: number | null; status: string; awardMode?: string | null; awardedPoints?: number | null; phone?: string | null; type: string; userLabel: string; missionTitle?: string | null; requestedPoints?: number | null; createdAt: Date }) {
   if (!sub.adminMsgId) return;
+  const label = await userLabelFresh(sub.userTgId, sub.userLabel);
   await tg('editMessageCaption', {
     chat_id: OWNER_CHAT_ID,
     message_id: sub.adminMsgId,
-    caption: subCaption(sub),
+    caption: subCaption({ ...sub, userLabel: label }),
     reply_markup: {
       inline_keyboard: [[{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }]],
     },
@@ -399,6 +410,7 @@ async function updateSubmissionMessage(sub: { id: string; adminMsgId?: number | 
  *  file_id کاربر متعلق به ربات اصلی است — بایت‌ها با توکن اصلی گرفته و به API پنل آپلود می‌شود */
 async function resendSubmissionPhoto(sub: {
   id: string;
+  userTgId: string;
   photoFileId: string;
   type: string;
   userLabel: string;
@@ -429,6 +441,7 @@ async function resendSubmissionPhoto(sub: {
       return false;
     }
     const bytes = await res.arrayBuffer();
+    const label = await userLabelFresh(sub.userTgId, sub.userLabel); // نام + @یوزرنیم + آیدی عددی
     const kb =
       sub.status === 'pending'
         ? {
@@ -443,7 +456,7 @@ async function resendSubmissionPhoto(sub: {
         : { inline_keyboard: [[{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }]] };
     const form = new FormData();
     form.append('chat_id', String(OWNER_CHAT_ID));
-    form.append('caption', subCaption(sub).slice(0, 1024));
+    form.append('caption', subCaption({ ...sub, userLabel: label }).slice(0, 1024));
     form.append('reply_markup', JSON.stringify(kb));
     form.append('photo', new Blob([bytes], { type: 'image/jpeg' }), 'photo.jpg');
     const up = await fetch(`${API}/sendPhoto`, { method: 'POST', body: form });
@@ -743,9 +756,10 @@ async function resolveAward(
   }
   const fresh = await p.submission.findUnique({ where: { id: subId } });
   if (fresh) await updateSubmissionMessage(fresh);
+  const who = await userLabelFresh(sub.userTgId, sub.userLabel);
   await sendMessage(
     chatId,
-    `✅ تایید و ثبت شد!\n\n👤 ${sub.userLabel}\n${mode === 'internet' ? '🌐 پاداش: اینترنت (منتظر شماره کاربر)' : `💎 ${fmtNum(points ?? 0)} امتیاز واریز شد`}\n📨 اطلاع‌رسانی به کاربر: ${sent ? 'انجام شد ✅' : 'ناموفق ⚠️'}`
+    `✅ تایید و ثبت شد!\n\n👤 ${who}\n${mode === 'internet' ? '🌐 پاداش: اینترنت (منتظر شماره کاربر)' : `💎 ${fmtNum(points ?? 0)} امتیاز واریز شد`}\n📨 اطلاع‌رسانی به کاربر: ${sent ? 'انجام شد ✅' : 'ناموفق ⚠️'}`
   );
   log(`تایید ارسالی ${subId} — mode=${mode} points=${points ?? 0} user=${sub.userTgId}`);
 }
@@ -771,9 +785,10 @@ async function resolveReject(chatId: number, subId: string, adminMsg: string | n
   const sent = await sendUser(sub.userTgId, notify);
   const fresh = await p.submission.findUnique({ where: { id: subId } });
   if (fresh) await updateSubmissionMessage(fresh);
+  const who = await userLabelFresh(sub.userTgId, sub.userLabel);
   await sendMessage(
     chatId,
-    `❌ لغو شد و کاربر مطلع گردید.\n\n👤 ${sub.userLabel}\n📨 ارسال پیام: ${sent ? 'انجام شد ✅' : 'ناموفق ⚠️'}`
+    `❌ لغو شد و کاربر مطلع گردید.\n\n👤 ${who}\n📨 ارسال پیام: ${sent ? 'انجام شد ✅' : 'ناموفق ⚠️'}`
   );
   log(`لغو ارسالی ${subId} user=${sub.userTgId}`);
 }
@@ -1053,9 +1068,10 @@ async function handleCallback(cb: AdminCallback) {
               : `پاداش پیشنهادی ماموریت: ${fmtNum(mission.rewardPoints ?? 0)} امتیاز`
             : '';
       adminStates.set(chatId, { kind: 'award', subId });
+      const who = await userLabelFresh(sub.userTgId, sub.userLabel);
       await sendMessage(
         chatId,
-        `✅ تایید ارسالی کاربر:\n👤 ${sub.userLabel}\n\nمقدار امتیاز را با عدد انگلیسی بفرست، یا برای پاداش اینترنت فقط بنویس: اینترنت\n\n${suggestText}\n\n(برای لغو بنویس: انصراف)`
+        `✅ تایید ارسالی کاربر:\n👤 ${who}\n\nمقدار امتیاز را با عدد انگلیسی بفرست، یا برای پاداش اینترنت فقط بنویس: اینترنت\n\n${suggestText}\n\n(برای لغو بنویس: انصراف)`
       );
       return;
     }
@@ -1072,9 +1088,10 @@ async function handleCallback(cb: AdminCallback) {
         return;
       }
       adminStates.set(chatId, { kind: 'reject', subId });
+      const who = await userLabelFresh(sub.userTgId, sub.userLabel);
       await sendMessage(
         chatId,
-        `❌ لغو ارسالی کاربر:\n👤 ${sub.userLabel}\n\nپیامی برایش بنویس که اشتباهش رو بگه (یا /skip بدون پیام):`
+        `❌ لغو ارسالی کاربر:\n👤 ${who}\n\nپیامی برایش بنویس که اشتباهش رو بگه (یا /skip بدون پیام):`
       );
       return;
     }
