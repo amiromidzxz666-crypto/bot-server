@@ -13,6 +13,8 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ---------- مدل‌های قدیمی قالب (نگه داشته شدند تا db push داده از دست ندهد) ----------
+
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
@@ -29,4 +31,80 @@ model Post {
   authorId  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ---------- سیستم امتیاز Wifto ----------
+
+// کاربران ربات WiftoBot (شناسه تلگرام به‌صورت رشته — آیدی‌ها از Int بزرگ‌ترند)
+model BotUser {
+  id        String   @id @default(cuid())
+  tgId      String   @unique
+  firstName String?
+  username  String?
+  points    Int      @default(0)
+  lotteries Int      @default(0) // چند بار در قرعه‌کشی‌ها شرکت کرده
+  wins      Int      @default(0) // چند بار برنده شده
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  submissions    Submission[]
+  entries        LotteryEntry[]
+}
+
+// ماموریت‌هایی که مدیر از پنل می‌سازد
+model Mission {
+  id           String  @id @default(cuid())
+  title        String
+  description  String
+  howTo        String // نحوه انجام + اینکه از کجا اسکرین‌شات بگیرد
+  rewardType   String  @default("points") // points | internet
+  rewardPoints Int?
+  active       Boolean @default(true)
+  createdAt    DateTime @default(now())
+  submissions  Submission[]
+}
+
+// ارسالی‌های کاربران (اسکرین‌شات ماموریت + رسید خرید امتیاز)
+model Submission {
+  id              String    @id @default(cuid())
+  type            String // mission | purchase
+  userTgId        String
+  userLabel       String // نام نمایشی هنگام ارسال
+  missionId       String?
+  missionTitle    String?
+  photoFileId     String
+  requestedPoints Int? // برای خرید امتیاز: امتیاز درخواستی
+  status          String    @default("pending") // pending | approved | rejected
+  awardMode       String? // points | internet
+  awardedPoints   Int?
+  phone           String?
+  adminMsgId      Int? // شناسه پیام عکس در چت مدیر (برای بروزرسانی/پاک‌کردن)
+  createdAt       DateTime  @default(now())
+  resolvedAt      DateTime?
+  user            BotUser?  @relation(fields: [userTgId], references: [tgId], onDelete: Cascade)
+  mission         Mission?  @relation(fields: [missionId], references: [id], onDelete: SetNull)
+}
+
+// قرعه‌کشی‌ها
+model Lottery {
+  id         String    @id @default(cuid())
+  title      String // توضیحات قرعه‌کشی
+  status     String    @default("open") // open | closed | drawn
+  winnerTgId String?
+  createdAt  DateTime  @default(now())
+  endedAt    DateTime?
+  entries    LotteryEntry[]
+}
+
+// شرکت‌کنندگان قرعه‌کشی — امتیاز لحظه شرکت قفل می‌شود
+model LotteryEntry {
+  id        String   @id @default(cuid())
+  lotteryId String
+  userTgId  String
+  points    Int // امتیازی که به قرعه‌کشی وارد کرد
+  createdAt DateTime @default(now())
+  lottery   Lottery  @relation(fields: [lotteryId], references: [id], onDelete: Cascade)
+  user      BotUser  @relation(fields: [userTgId], references: [tgId], onDelete: Cascade)
+
+  @@unique([lotteryId, userTgId])
 }

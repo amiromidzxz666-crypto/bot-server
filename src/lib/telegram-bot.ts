@@ -1,34 +1,67 @@
 // ============================================================
-// ماژول ربات تلگرام (سمت سرور Next.js) — نسخه اسکلتی بدون هوش مصنوعی
+// ربات تلگرام Wifto (@WiftoBot) — اینترنت رایگان
+// بخش‌ها: ماموریت‌ها، قرعه‌کشی، خرید امتیاز، حساب کاربری، پشتیبانی
+// بدون هیچ هوش مصنوعی — همه منطق قاعده‌محور است
 // با instrumentation.ts موقع بالا آمدن سرور اجرا می‌شود
-// قابلیت‌های جدید بعداً طبق دستور مالک به این فایل اضافه می‌شود
 // ============================================================
 import { readFileSync, writeFileSync } from 'node:fs';
 import { getPublicBaseUrl } from './public-url';
+import { ensureUser, getUserByTg, faTime, fmtNum, toEnDigits } from './wifto-db';
 
 export const TOKEN = process.env.TG_MAIN_BOT_TOKEN ?? '';
+const ADMIN_TOKEN = process.env.TG_ADMIN_BOT_TOKEN ?? ''; // برای ارسال ارسالی‌ها به پنل مدیر
 const API = `https://api.telegram.org/bot${TOKEN}`;
+const ADMIN_API = `https://api.telegram.org/bot${ADMIN_TOKEN}`;
 const OWNER_CHAT_ID = process.env.OWNER_TG_CHAT_ID ? Number(process.env.OWNER_TG_CHAT_ID) : 0; // از Secrets
 const TG_LIMIT = 4000;
 
-// ---------- متن‌های ربات (بدون هیچ قابلیت هوش مصنوعی) ----------
+// ---------- تنظیمات فروش امتیاز ----------
+const CARD_NO = '6219861852598258';
+const CARD_NAME = 'امیرحسین محمدزاده';
+const SUPPORT_CHANNEL = '@Notification_Wifto';
+const PRICE_PER_POINT = 1000; // تومان به ازای هر امتیاز
+const BONUS_MIN_TOMAN = 30000; // بالای این مبلغ ضریب می‌گیرد
+const BONUS_FACTOR = 2;
 
-const WELCOME = `سلام! 👋
+// ---------- متن‌های ربات ----------
 
-🔧 این ربات در حال بازطراحی کامل است و به‌زودی با قابلیت‌های جدید برمی‌گردد.
+const WELCOME = (name?: string) => `سلام ${name ? `${name} عزیز` : ''}! 👋
 
-برای اطلاع از آخرین وضعیت، بعداً دوباره سر بزنید 🙏`;
+به ربات Wifto خوش اومدی 🌐
 
-const UPDATE_NOTE = `🔧 این ربات در حال بازطراحی است و فعلاً قابلیت خاصی ارائه نمی‌دهد.
+🎯 ماموریت انجام بده و امتیاز بگیر
+🎰 تو قرعه‌کشی‌ها شانس برنده شدن داشته باش
+💎 امتیاز بخر یا اینترنت رایگان هدیه بگیر
 
-به‌زودی قابلیت‌های جدید همین‌جا اعلام می‌شود — منتظر خبرها باشید! 🙏`;
+از منوی زیر انتخاب کن 👇`;
 
-const ABOUT_TEXT = `ℹ️ درباره ما
+const MENU_HINT = `لطفاً از دکمه‌های منوی زیر استفاده کن 👇`;
 
-این ربات در حال بازطراحی است و نسخه جدید آن به‌زودی با قابلیت‌های تازه عرضه می‌شود.`;
+const SUPPORT_TEXT = `🎧 پشتیبانی
 
-const START_KEYBOARD = {
-  inline_keyboard: [[{ text: 'ℹ️ درباره ما', callback_data: 'about' }]],
+جهت ارتباط با پشتیبانی به دایرکت این کانال مراجعه کنید:
+${SUPPORT_CHANNEL}`;
+
+const NO_MISSIONS = `🎯 ماموریت‌ها
+
+فعلاً ماموریت فعالی وجود ندارد ⏳
+به‌زودی ماموریت‌های جدید همین‌جا قرار می‌گیرد — منتظر باش!`;
+
+const NO_LOTTERY = `🎰 قرعه‌کشی
+
+در حال حاضر قرعه‌کشی فعالی وجود ندارد ⏳
+
+امتیازهایت را با انجام ماموریت‌ها جمع کن تا تو قرعه‌کشی‌های بعدی شانس بیشتری داشته باشی 🍀`;
+
+const MAIN_KEYBOARD = {
+  keyboard: [
+    [{ text: '🎯 ماموریت‌ها' }],
+    [{ text: '🎰 قرعه‌کشی' }],
+    [{ text: '💎 خرید امتیاز' }],
+    [{ text: '👤 حساب کاربری' }, { text: '🎧 پشتیبانی' }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -44,6 +77,7 @@ async function tg(method: string, params: Record<string, unknown>, retries = 2) 
       });
       const data = (await res.json()) as {
         ok: boolean;
+        result?: { message_id?: number };
         parameters?: { retry_after?: number };
         description?: string;
       };
@@ -58,6 +92,37 @@ async function tg(method: string, params: Record<string, unknown>, retries = 2) 
       return null;
     } catch (e) {
       log(`خطای شبکه تلگرام (${method}): ${(e as Error).message}`);
+      if (i < retries) await sleep(1500 * (i + 1));
+    }
+  }
+  return null;
+}
+
+/** ارسال به چت مدیر از طریق ربات پنل (@HmganBot) */
+async function tgAdmin(method: string, params: Record<string, unknown>, retries = 2) {
+  if (!ADMIN_TOKEN) return null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(`${ADMIN_API}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      });
+      const data = (await res.json()) as {
+        ok: boolean;
+        result?: { message_id?: number };
+        parameters?: { retry_after?: number };
+        description?: string;
+      };
+      if (data.ok) return data;
+      if (data.parameters?.retry_after && i < retries) {
+        await sleep((data.parameters.retry_after + 1) * 1000);
+        continue;
+      }
+      log(`خطای تلگرام مدیر (${method}): ${data.description ?? '?'}`);
+      return null;
+    } catch (e) {
+      log(`خطای شبکه تلگرام مدیر (${method}): ${(e as Error).message}`);
       if (i < retries) await sleep(1500 * (i + 1));
     }
   }
@@ -163,28 +228,455 @@ type TgMsg = {
   date?: number;
   text?: string;
   caption?: string;
+  photo?: { file_id: string; width: number; height: number }[];
+  contact?: { phone_number?: string };
 };
 
+// ---------- حالت‌های گفتگوی کاربر ----------
+type UserState =
+  | { kind: 'mission_photo'; missionId: string; missionTitle: string; fileId?: string }
+  | { kind: 'buy_amount' }
+  | { kind: 'buy_receipt'; points: number; toman: number; fileId?: string }
+  | { kind: 'phone'; phone?: string };
+
+const userStates = new Map<number, UserState>();
+
+// دکمه‌های تایید/انصراف ارسال عکس
+const PHOTO_CONFIRM_KB = (okData: string) => ({
+  inline_keyboard: [
+    [
+      { text: '✅ تایید و ارسال', callback_data: okData },
+      { text: '❌ انصراف', callback_data: 'xst' },
+    ],
+  ],
+});
+
+function rewardText(m: { rewardType: string; rewardPoints?: number | null }): string {
+  return m.rewardType === 'internet'
+    ? '🌐 اینترنت رایگان'
+    : `💎 ${fmtNum(m.rewardPoints ?? 0)} امتیاز`;
+}
+
+// ---------- ماموریت‌ها ----------
+async function sendMissionsList(chatId: number) {
+  const { p } = await import('./wifto-db');
+  const missions = await p.mission.findMany({
+    where: { active: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!missions.length) {
+    await sendMessage(chatId, NO_MISSIONS, MAIN_KEYBOARD);
+    return;
+  }
+  const rows = missions.map((m) => [
+    { text: `🎯 ${m.title}`, callback_data: `m:${m.id}` },
+  ]);
+  rows.push([{ text: '🔄 بروزرسانی لیست', callback_data: 'mlist' }]);
+  await sendMessage(chatId, `🎯 ماموریت‌ها\n\nروی هر ماموریت بزن تا توضیحات و نحوه انجامش رو ببینی 👇`, {
+    inline_keyboard: rows,
+  });
+}
+
+async function sendMissionDetail(chatId: number, missionId: string) {
+  const { p } = await import('./wifto-db');
+  const m = await p.mission.findUnique({ where: { id: missionId } });
+  if (!m || !m.active) {
+    await sendMessage(chatId, 'این ماموریت دیگر فعال نیست 🙏', MAIN_KEYBOARD);
+    return;
+  }
+  await sendMessage(
+    chatId,
+    `🎯 ${m.title}\n\n📝 توضیحات:\n${m.description}\n\n📋 نحوه انجام و اسکرین‌شات:\n${m.howTo}\n\n🎁 پاداش: ${rewardText(m)}`,
+    {
+      inline_keyboard: [
+        [{ text: '📸 ارسال اسکرین‌شات', callback_data: `ms:${m.id}` }],
+        [{ text: '📚 لیست ماموریت‌ها', callback_data: 'mlist' }],
+      ],
+    }
+  );
+}
+
+async function startMissionPhoto(chatId: number, missionId: string) {
+  const { p } = await import('./wifto-db');
+  const m = await p.mission.findUnique({ where: { id: missionId } });
+  if (!m || !m.active) {
+    await sendMessage(chatId, 'این ماموریت دیگر فعال نیست 🙏', MAIN_KEYBOARD);
+    return;
+  }
+  // جلوگیری از ارسال تکراری وقتی یک ارسال در انتظار بررسی است
+  const pending = await p.submission.findFirst({
+    where: { userTgId: String(chatId), missionId, type: 'mission', status: 'pending' },
+  });
+  if (pending) {
+    await sendMessage(
+      chatId,
+      '⏳ این ماموریت قبلاً ارسال کرده‌ای و در انتظار بررسی است.\nنتیجه بررسی بهت اطلاع داده می‌شود 🙏',
+      MAIN_KEYBOARD
+    );
+    return;
+  }
+  userStates.set(chatId, { kind: 'mission_photo', missionId, missionTitle: m.title });
+  await sendMessage(
+    chatId,
+    `📸 صفحه ارسال اسکرین‌شات\n\n🎯 ماموریت: ${m.title}\n\n📋 ${m.howTo}\n\nحالا عکس (اسکرین‌شات) خود را بفرست:`,
+    { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'xst' }]] }
+  );
+}
+
+async function submitMissionPhoto(chatId: number, firstName?: string, username?: string) {
+  const st = userStates.get(chatId);
+  if (st?.kind !== 'mission_photo' || !st.fileId) {
+    userStates.delete(chatId);
+    await sendMessage(chatId, '⏳ مهلت این درخواست گذشت — لطفاً دوباره از منوی ماموریت‌ها تلاش کن 🙏', MAIN_KEYBOARD);
+    return;
+  }
+  const { p, userLabel } = await import('./wifto-db');
+  const m = await p.mission.findUnique({ where: { id: st.missionId } });
+  if (!m) {
+    await sendMessage(chatId, 'ماموریت پیدا نشد 🙏', MAIN_KEYBOARD);
+    userStates.delete(chatId);
+    return;
+  }
+  const tgId = String(chatId);
+  const label = userLabel({ firstName, username, tgId });
+  const sub = await p.submission.create({
+    data: {
+      type: 'mission',
+      userTgId: tgId,
+      userLabel: label,
+      missionId: m.id,
+      missionTitle: m.title,
+      photoFileId: st.fileId,
+    },
+  });
+  // ارسال عکس به پنل مدیر از طریق ربات پنل
+  const sent = await tgAdmin(
+    'sendPhoto',
+    {
+      chat_id: OWNER_CHAT_ID,
+      photo: st.fileId,
+      caption:
+        `📥 ارسالی جدید — 🎯 ماموریت\n\n` +
+        `👤 کاربر: ${label}\n` +
+        `🎯 ماموریت: ${m.title}\n` +
+        `🎁 پاداش پیشنهادی: ${rewardText(m)}\n` +
+        `⏰ ${faTime(new Date())}`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ تایید', callback_data: `s_ok:${sub.id}` },
+            { text: '❌ لغو', callback_data: `s_no:${sub.id}` },
+          ],
+          [{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }],
+        ],
+      },
+    },
+    3
+  );
+  if (sent?.result?.message_id) {
+    await p.submission.update({ where: { id: sub.id }, data: { adminMsgId: sent.result.message_id } });
+  }
+  userStates.delete(chatId);
+  await sendMessage(
+    chatId,
+    '✅ ارسال شد!\n\nعکست به پشتیبانی رسید و در صف بررسی است؛ نتیجه‌اش رو همین‌جا بهت اطلاع می‌دیم 🙏',
+    MAIN_KEYBOARD
+  );
+}
+
+// ---------- قرعه‌کشی ----------
+async function sendLotteryPage(chatId: number) {
+  const { p } = await import('./wifto-db');
+  const lot = await p.lottery.findFirst({ where: { status: 'open' }, orderBy: { createdAt: 'desc' } });
+  if (!lot) {
+    await sendMessage(chatId, NO_LOTTERY, MAIN_KEYBOARD);
+    return;
+  }
+  const entries = await p.lotteryEntry.findMany({ where: { lotteryId: lot.id } });
+  const u = await getUserByTg(String(chatId));
+  const total = entries.reduce((s, e) => s + e.points, 0);
+  const joined = entries.some((e) => e.userTgId === String(chatId));
+  let text =
+    `🎰 قرعه‌کشی فعال!\n\n${lot.title}\n\n` +
+    `🎟 شرکت‌کنندگان: ${fmtNum(entries.length)} نفر\n` +
+    `💎 مجموع امتیازهای قرعه‌کشی: ${fmtNum(total)}\n\n` +
+    `هر کی امتیاز بیشتری داشته باشه، شانس برنده شدنش بیشتره! 🍀\n\n` +
+    `💎 امتیاز فعلی شما: ${fmtNum(u?.points ?? 0)}\n`;
+  if (joined) {
+    text += '\n✅ شما در این قرعه‌کشی ثبت‌نام کرده‌اید!\nبا انجام ماموریت‌های فعال می‌تونی برای قرعه‌کشی‌های بعدی دوباره امتیاز جمع کنی 🎯';
+    await sendMessage(chatId, text, MAIN_KEYBOARD);
+    return;
+  }
+  await sendMessage(chatId, text, {
+    inline_keyboard: [[{ text: '🎟 شرکت در قرعه‌کشی', callback_data: 'lot_join' }]],
+  });
+}
+
+/** نمایش صفحه تایید نهایی شرکت در قرعه‌کشی */
+async function askLotteryJoin(chatId: number) {
+  const { p } = await import('./wifto-db');
+  const tgId = String(chatId);
+  const lot = await p.lottery.findFirst({ where: { status: 'open' }, orderBy: { createdAt: 'desc' } });
+  if (!lot) {
+    await sendMessage(chatId, NO_LOTTERY, MAIN_KEYBOARD);
+    return;
+  }
+  const u = await getUserByTg(tgId);
+  if (!u || u.points < 1) {
+    await sendMessage(
+      chatId,
+      '💎 برای شرکت در قرعه‌کشی حداقل ۱ امتیاز لازم است!\n\nبا انجام ماموریت‌های فعال امتیاز جمع کن بعد بیا 🎯',
+      MAIN_KEYBOARD
+    );
+    return;
+  }
+  const already = await p.lotteryEntry.findUnique({
+    where: { lotteryId_userTgId: { lotteryId: lot.id, userTgId: tgId } },
+  });
+  if (already) {
+    await sendMessage(chatId, '✅ شما قبلاً در این قرعه‌کشی شرکت کرده‌اید 🍀', MAIN_KEYBOARD);
+    return;
+  }
+  await sendMessage(
+    chatId,
+    `🎟 شرکت در قرعه‌کشی\n\n💎 امتیاز فعلی شما: ${fmtNum(u.points)}\n\nبا تایید، همه امتیازت وارد قرعه‌کشی می‌شه و حسابت صفر می‌شه.\n\nمطمئنی؟`,
+    {
+      inline_keyboard: [
+        [
+          { text: '✅ تایید و ثبت', callback_data: 'lot_yes' },
+          { text: '❌ انصراف', callback_data: 'xst' },
+        ],
+      ],
+    }
+  );
+}
+
+async function confirmLotteryJoin(chatId: number) {
+  const { p } = await import('./wifto-db');
+  const tgId = String(chatId);
+  const lot = await p.lottery.findFirst({ where: { status: 'open' }, orderBy: { createdAt: 'desc' } });
+  if (!lot) {
+    await sendMessage(chatId, NO_LOTTERY, MAIN_KEYBOARD);
+    return;
+  }
+  const u = await getUserByTg(tgId);
+  if (!u || u.points < 1) {
+    await sendMessage(chatId, '💎 امتیازی برای شرکت در قرعه‌کشی نداری — اول ماموریت انجام بده 🎯', MAIN_KEYBOARD);
+    return;
+  }
+  const already = await p.lotteryEntry.findUnique({
+    where: { lotteryId_userTgId: { lotteryId: lot.id, userTgId: tgId } },
+  });
+  if (already) {
+    await sendMessage(chatId, '✅ شما قبلاً در این قرعه‌کشی شرکت کرده‌اید 🍀', MAIN_KEYBOARD);
+    return;
+  }
+  // امتیازها قفل می‌شوند
+  const pts = u.points;
+  await p.$transaction([
+    p.botUser.update({ where: { tgId }, data: { points: { decrement: pts }, lotteries: { increment: 1 } } }),
+    p.lotteryEntry.create({ data: { lotteryId: lot.id, userTgId: tgId, points: pts } }),
+  ]);
+  await sendMessage(
+    chatId,
+    `✅ شرکتت در قرعه‌کشی ثبت شد! 🍀\n\n💎 ${fmtNum(pts)} امتیازت وارد قرعه‌کشی شد.\n\nمی‌تونی با انجام ماموریت‌های فعال دوباره امتیاز جمع کنی 🎯`,
+    MAIN_KEYBOARD
+  );
+}
+
+// ---------- خرید امتیاز ----------
+async function startBuy(chatId: number) {
+  userStates.set(chatId, { kind: 'buy_amount' });
+  await sendMessage(
+    chatId,
+    `💎 خرید امتیاز
+
+مقدار امتیازی که می‌خوای بخری رو مشخص کن (عدد بفرست):
+
+💵 هر امتیاز = ${fmtNum(PRICE_PER_POINT)} تومان
+🎁 اگر بالای ${fmtNum(BONUS_MIN_TOMAN)} تومان خرید کنی، امتیازت ${BONUS_FACTOR} برابر می‌شه!
+
+مثلاً: 30`,
+    { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'xst' }]] }
+  );
+}
+
+async function handleBuyAmount(chatId: number, raw: string) {
+  const n = parseInt(toEnDigits(raw).replace(/[^\d]/g, ''), 10);
+  if (!n || n < 1 || n > 100000) {
+    await sendMessage(chatId, '⛔ عدد معتبر بفرست (مثلاً 10 یا 50):');
+    return;
+  }
+  const toman = n * PRICE_PER_POINT;
+  const bonus = toman >= BONUS_MIN_TOMAN;
+  const finalPoints = bonus ? n * BONUS_FACTOR : n;
+  userStates.set(chatId, { kind: 'buy_receipt', points: n, toman });
+  let text =
+    `🧾 فاکتور خرید\n\n` +
+    `💎 امتیاز درخواستی: ${fmtNum(n)}\n` +
+    `💳 مبلغ پرداخت: ${fmtNum(toman)} تومان\n`;
+  if (bonus) text += `🎁 هدیه ضریب: به‌جای ${fmtNum(n)} امتیاز، ${fmtNum(finalPoints)} امتیاز می‌گیری!\n`;
+  text +=
+    `\n💳 شماره کارت:\n${CARD_NO}\n👤 به نام: ${CARD_NAME}\n\n` +
+    `بعد از کارت‌به‌کارت، روی دکمه «📸 ارسال رسید» بزن و عکس رسید رو بفرست:`;
+  await sendMessage(chatId, text, {
+    inline_keyboard: [
+      [{ text: '📸 ارسال رسید', callback_data: 'buy_ask' }],
+      [{ text: '❌ انصراف', callback_data: 'xst' }],
+    ],
+  });
+}
+
+async function submitPurchaseReceipt(chatId: number, firstName?: string, username?: string) {
+  const st = userStates.get(chatId);
+  if (st?.kind !== 'buy_receipt' || !st.fileId) {
+    userStates.delete(chatId);
+    await sendMessage(chatId, '⏳ مهلت این درخواست گذشت — لطفاً دوباره از منوی خرید امتیاز تلاش کن 🙏', MAIN_KEYBOARD);
+    return;
+  }
+  const { p, userLabel } = await import('./wifto-db');
+  const tgId = String(chatId);
+  const label = userLabel({ firstName, username, tgId });
+  const sub = await p.submission.create({
+    data: {
+      type: 'purchase',
+      userTgId: tgId,
+      userLabel: label,
+      photoFileId: st.fileId,
+      requestedPoints: st.points,
+    },
+  });
+  const sent = await tgAdmin(
+    'sendPhoto',
+    {
+      chat_id: OWNER_CHAT_ID,
+      photo: st.fileId,
+      caption:
+        `📥 ارسالی جدید — 💎 خرید امتیاز\n\n` +
+        `👤 کاربر: ${label}\n` +
+        `💎 امتیاز درخواستی: ${fmtNum(st.points)}\n` +
+        `💳 مبلغ: ${fmtNum(st.toman)} تومان\n` +
+        `⏰ ${faTime(new Date())}`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ تایید', callback_data: `s_ok:${sub.id}` },
+            { text: '❌ لغو', callback_data: `s_no:${sub.id}` },
+          ],
+          [{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }],
+        ],
+      },
+    },
+    3
+  );
+  if (sent?.result?.message_id) {
+    await p.submission.update({ where: { id: sub.id }, data: { adminMsgId: sent.result.message_id } });
+  }
+  userStates.delete(chatId);
+  await sendMessage(
+    chatId,
+    '✅ رسیدت ارسال شد!\n\nبعد از تایید پشتیبانی، امتیازها به حسابت اضافه می‌شه و همین‌جا بهت خبر می‌دیم 🙏',
+    MAIN_KEYBOARD
+  );
+}
+
+// ---------- حساب کاربری ----------
+async function sendAccount(chatId: number, firstName?: string, username?: string) {
+  const u = await getUserByTg(String(chatId));
+  await sendMessage(
+    chatId,
+    `👤 حساب کاربری
+
+👤 نام: ${u?.firstName || firstName || '—'}
+🆔 آیدی عددی: ${chatId}${username ? `\n🔗 یوزرنیم: @${username}` : ''}
+💎 امتیاز: ${fmtNum(u?.points ?? 0)}
+🎯 شرکت در قرعه‌کشی‌ها: ${fmtNum(u?.lotteries ?? 0)} بار
+🏆 برنده شدن: ${fmtNum(u?.wins ?? 0)} بار${u?.phone ? `\n📱 شماره: ${u.phone}` : ''}`,
+    MAIN_KEYBOARD
+  );
+}
+
+// ---------- شماره تلفن (پس از پاداش اینترنت) ----------
+/** توسط پنل مدیر (@HmganBot) صدا زده می‌شود تا کاربر شماره‌اش را بفرستد */
+export function beginPhoneFlow(chatId: number) {
+  userStates.set(chatId, { kind: 'phone' });
+  sendMessage(
+    chatId,
+    `✅ ماموریت شما تایید شد! 🎉\n\n🌐 برای اینکه اینترنت را برای شما فعال کنیم، شماره تلفن خود را ارسال کنید 📱`,
+    MAIN_KEYBOARD
+  ).catch(() => {});
+}
+
+async function handlePhoneInput(chatId: number, rawPhone: string) {
+  const digits = toEnDigits(rawPhone).replace(/[^\d+]/g, '');
+  const onlyDigits = digits.replace(/\D/g, '');
+  if (onlyDigits.length < 10 || onlyDigits.length > 14) {
+    await sendMessage(chatId, '📱 شماره تلفن معتبر بفرست (مثلاً 09123456789):');
+    return;
+  }
+  const st = userStates.get(chatId);
+  if (st?.kind === 'phone') st.phone = onlyDigits;
+  await sendMessage(
+    chatId,
+    `📞 شماره شما:\n${onlyDigits}\n\nاین شماره برای فعال‌سازی اینترنت به پشتیبانی ارسال شود؟`,
+    PHOTO_CONFIRM_KB('ph_ok')
+  );
+}
+
+async function submitPhone(chatId: number) {
+  const st = userStates.get(chatId);
+  if (st?.kind !== 'phone' || !st.phone) {
+    userStates.delete(chatId);
+    await sendMessage(chatId, '⏳ مهلت این درخواست گذشت — لطفاً دوباره شماره‌ت رو بفرست 🙏', MAIN_KEYBOARD);
+    return;
+  }
+  const { p } = await import('./wifto-db');
+  const tgId = String(chatId);
+  await p.botUser.update({ where: { tgId }, data: { phone: st.phone } }).catch(() => {});
+  // آخرین ارسالیِ تاییدشدهِ در انتظار شماره را پیدا کن (برای مرجع)
+  const sub = await p.submission.findFirst({
+    where: { userTgId: tgId, awardMode: 'internet', status: 'approved' },
+    orderBy: { resolvedAt: 'desc' },
+  });
+  if (sub && !sub.phone) {
+    await p.submission.update({ where: { id: sub.id }, data: { phone: st.phone } });
+  }
+  await tgAdmin(
+    'sendMessage',
+    {
+      chat_id: OWNER_CHAT_ID,
+      text:
+        `📞 شماره تلفن کاربر برای فعال‌سازی اینترنت:\n\n` +
+        `👤 ${sub?.userLabel ?? tgId}\n` +
+        `📱 شماره: ${st.phone}\n` +
+        (sub?.missionTitle ? `🎯 ماموریت: ${sub.missionTitle}\n` : '') +
+        `⏰ ${faTime(new Date())}`,
+    },
+    3
+  );
+  userStates.delete(chatId);
+  await sendMessage(chatId, '✅ شماره‌ت ثبت شد!\n\nاینترنت به‌زودی برات فعال می‌شه 🌐🙏', MAIN_KEYBOARD);
+}
+
+// ---------- پیام‌ها ----------
 async function handleMessage(msg: TgMsg) {
   const chatId = msg.chat?.id;
   if (!chatId) return;
   if (msg.from?.is_bot) return;
 
-  // گروه‌ها فعلاً بی‌پاسخ — قابلیت گروهی بعداً طبق دستور مالک اضافه می‌شود
+  // فقط چت خصوصی — گروه‌ها بی‌پاسخ
   const isGroup = msg.chat?.type === 'group' || msg.chat?.type === 'supergroup';
   if (isGroup) return;
 
-  const text = (msg.text || msg.caption || '').trim();
+  const text = (msg.text || '').trim();
+  const firstName = msg.from?.first_name;
+  const username = msg.from?.username;
 
   if (tooFast(chatId)) return; // اسپم را بی‌صدا رد کن
-  registerUser(chatId, msg.from?.username, msg.from?.first_name);
+  registerUser(chatId, username, firstName);
+  await ensureUser(String(chatId), firstName, username).catch(() => {});
 
-  if (text === '/start' || text === '/help') {
-    await sendMessage(chatId, WELCOME, START_KEYBOARD);
-    return;
-  }
-
-  // ---------- فرمان‌های مدیر (فقط مالک ربات — ابزار مدیریت، بدون AI) ----------
+  // ---------- فرمان‌های مدیر (ابزار مدیریت — بدون AI) ----------
   if (chatId === OWNER_CHAT_ID && text.startsWith('/broadcast')) {
     const bcText = text.replace(/^\/broadcast\s*/, '').trim();
     if (!bcText) {
@@ -205,20 +697,103 @@ async function handleMessage(msg: TgMsg) {
   if (chatId === OWNER_CHAT_ID && text.startsWith('/stats')) {
     const now = Math.floor(Date.now() / 1000);
     const active24h = [...seenUsers.values()].filter((u) => now - u.ts < 86400).length;
+    const { p } = await import('./wifto-db');
+    const totalUsers = await p.botUser.count();
     await sendMessage(
       chatId,
-      `📊 آمار ربات:\n👥 کل کاربران: ${seenUsers.size}\n🔥 فعال ۲۴ ساعت گذشته: ${active24h}`
+      `📊 آمار ربات:\n👥 کل کاربران: ${seenUsers.size} (در دیتابیس: ${totalUsers})\n🔥 فعال ۲۴ ساعت گذشته: ${active24h}`
     );
     return;
   }
 
-  if (!text) {
-    await sendMessage(chatId, 'فعلاً فقط متن را می‌فهمم 🙏');
+  // ---------- عکس ----------
+  if (msg.photo?.length) {
+    const st = userStates.get(chatId);
+    const fileId = msg.photo[msg.photo.length - 1].file_id;
+    if (st?.kind === 'mission_photo') {
+      st.fileId = fileId;
+      await sendMessage(chatId, `🖼 عکس دریافت شد.\n\nمی‌خوای ارسالش کنی؟`, PHOTO_CONFIRM_KB('ms_ok'));
+      return;
+    }
+    if (st?.kind === 'buy_receipt') {
+      st.fileId = fileId;
+      await sendMessage(chatId, `🧾 عکس رسید دریافت شد.\n\nمی‌خوای ارسالش کنی؟`, PHOTO_CONFIRM_KB('buy_ok'));
+      return;
+    }
+    await sendMessage(
+      chatId,
+      '📸 برای ارسال عکس، اول از منو «🎯 ماموریت‌ها» یا «💎 خرید امتیاز» رو انتخاب کن 👇',
+      MAIN_KEYBOARD
+    );
     return;
   }
 
-  // هر پیام دیگری — پاسخ placeholder (بدون هوش مصنوعی)
-  await sendMessage(chatId, UPDATE_NOTE);
+  // ---------- شماره تماس (اشتراک مخاطب) ----------
+  if (msg.contact?.phone_number) {
+    const st = userStates.get(chatId);
+    if (st?.kind === 'phone') {
+      await handlePhoneInput(chatId, msg.contact.phone_number);
+      return;
+    }
+  }
+
+  if (text === '/start' || text === '/help') {
+    userStates.delete(chatId);
+    await sendMessage(chatId, WELCOME(firstName), MAIN_KEYBOARD);
+    return;
+  }
+
+  if (text === 'انصراف' || text === '/cancel') {
+    userStates.delete(chatId);
+    await sendMessage(chatId, `باشه، لغو شد 👌\n\n${MENU_HINT}`, MAIN_KEYBOARD);
+    return;
+  }
+
+  const st = userStates.get(chatId);
+
+  // ---------- جریان‌های فعال ----------
+  if (st?.kind === 'phone' && text) {
+    await handlePhoneInput(chatId, text);
+    return;
+  }
+  if (st?.kind === 'buy_amount' && text) {
+    await handleBuyAmount(chatId, text);
+    return;
+  }
+  if (st?.kind === 'mission_photo') {
+    await sendMessage(chatId, '📸 لطفاً عکس (اسکرین‌شات) بفرست، یا «انصراف» را بزن:');
+    return;
+  }
+  if (st?.kind === 'buy_receipt') {
+    await sendMessage(chatId, '🧾 لطفاً عکس رسید پرداخت را بفرست، یا «انصراف» را بزن:');
+    return;
+  }
+
+  if (!text) {
+    await sendMessage(chatId, MENU_HINT, MAIN_KEYBOARD);
+    return;
+  }
+
+  // ---------- منوی اصلی ----------
+  switch (text) {
+    case '🎯 ماموریت‌ها':
+      await sendMissionsList(chatId);
+      return;
+    case '🎰 قرعه‌کشی':
+      await sendLotteryPage(chatId);
+      return;
+    case '💎 خرید امتیاز':
+      await startBuy(chatId);
+      return;
+    case '👤 حساب کاربری':
+      await sendAccount(chatId, firstName, username);
+      return;
+    case '🎧 پشتیبانی':
+      await sendMessage(chatId, SUPPORT_TEXT, MAIN_KEYBOARD);
+      return;
+  }
+
+  await sendMessage(chatId, MENU_HINT, MAIN_KEYBOARD);
 }
 
 // ---------- پردازش دکمه‌های شیشه‌ای ----------
@@ -234,23 +809,67 @@ async function handleCallback(cb: TgCallback) {
   if (!chatId) return;
   if (cb.message?.chat?.type && cb.message.chat.type !== 'private') return;
   registerUser(chatId, cb.from?.username, cb.from?.first_name);
+  await ensureUser(String(chatId), cb.from?.first_name, cb.from?.username).catch(() => {});
 
   // همیشه callback را پاس بده تا چرخ‌دنگ دکمه بایستد
   const answer = (text?: string) =>
     tg('answerCallbackQuery', { callback_query_id: cb.id, text }).catch(() => {});
 
-  switch (cb.data) {
-    case 'about':
+  const data = cb.data ?? '';
+  const firstName = cb.from?.first_name;
+  const username = cb.from?.username;
+
+  switch (true) {
+    case data === 'mlist':
       await answer();
-      await sendMessage(chatId, ABOUT_TEXT);
-      break;
-    case 'start_chat':
-    case 'make_image':
-    case 'clear_chat':
-      // دکمه‌های نسخه قبلی (AI) که هنوز در چت‌های قدیمی موجود است — پاسخ ملایم
-      await answer('به‌زودی!');
-      await sendMessage(chatId, UPDATE_NOTE);
-      break;
+      await sendMissionsList(chatId);
+      return;
+    case data.startsWith('m:'):
+      await answer();
+      await sendMissionDetail(chatId, data.slice(2));
+      return;
+    case data.startsWith('ms:'):
+      await answer('📸 بفرست!');
+      await startMissionPhoto(chatId, data.slice(3));
+      return;
+    case data === 'ms_ok': {
+      await answer('در حال ارسال...');
+      await submitMissionPhoto(chatId, firstName, username);
+      return;
+    }
+    case data === 'lot_join':
+      await answer('🎟');
+      await askLotteryJoin(chatId);
+      return;
+    case data === 'lot_yes':
+      await answer('در حال ثبت...');
+      await confirmLotteryJoin(chatId);
+      return;
+    case data === 'buy_ask':
+      await answer('📸 عکس رسید رو بفرست');
+      await sendMessage(chatId, '🧾 عکس رسید پرداخت رو همین‌جا بفرست:', {
+        inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'xst' }]],
+      });
+      return;
+    case data === 'buy_ok': {
+      await answer('در حال ارسال...');
+      await submitPurchaseReceipt(chatId, firstName, username);
+      return;
+    }
+    case data === 'ph_ok':
+      await answer('در حال ثبت...');
+      await submitPhone(chatId);
+      return;
+    case data === 'xst':
+      userStates.delete(chatId);
+      await answer('لغو شد');
+      await sendMessage(chatId, `باشه، لغو شد 👌\n\n${MENU_HINT}`, MAIN_KEYBOARD);
+      return;
+    case data === 'about' || data === 'start_chat' || data === 'make_image' || data === 'clear_chat':
+      // دکمه‌های نسخه‌های قبلی که هنوز در چت‌های قدیمی موجود است
+      await answer();
+      await sendMessage(chatId, MENU_HINT, MAIN_KEYBOARD);
+      return;
     default:
       await answer();
   }
@@ -372,14 +991,14 @@ export async function startTelegramBot() {
   }
 
   // ۲) حالت polling (وقتی آدرس عمومی تنظیم نشده)
-  log('✅ ربات روشن شد — long polling شروع شد (نسخه بدون هوش مصنوعی)');
+  log('✅ WiftoBot روشن شد — long polling شروع شد (ماموریت/قرعه‌کشی/خرید امتیاز — بدون AI)');
   pollLoop().catch((e) => log(`خطای حلقه polling: ${(e as Error).message}`));
 
   // اطلاع‌رسانی به کاربر اصلی که ربات آنلاین است (فقط حالت polling)
   setTimeout(() => {
     sendMessage(
       OWNER_CHAT_ID,
-      '🤖 ربات روشن شد!\n\n🔧 نسخه جدید در حال آماده‌سازی است — قابلیت‌های جدید به‌زودی فعال می‌شود.'
+      '🤖 WiftoBot روشن شد! ✅\n\n🎯 ماموریت‌ها | 🎰 قرعه‌کشی | 💎 خرید امتیاز | 👤 حساب کاربری | 🎧 پشتیبانی\n\nسیستم کامل آماده است — پنل مدیریت هم در @HmganBot فعال شد.'
     ).catch(() => {});
   }, 2000);
 }

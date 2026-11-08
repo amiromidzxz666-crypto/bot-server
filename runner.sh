@@ -33,9 +33,8 @@ ls -la "$DATA_DIR" || true
 echo "=== ۲) نصب و ساخت ==="
 bun install
 bunx prisma generate
-if [ ! -f "$DATA_DIR/custom.db" ]; then
-  bunx prisma db push --skip-generate >/dev/null 2>&1 || echo "(db push رد شد)"
-fi
+echo "=== prisma db push — بروزرسانی اسکیمای دیتابیس روی db بازیابی‌شده (بدون از دست دادن داده) ==="
+bunx prisma db push --skip-generate || echo "!! db push ناموفق — ادامه با اسکیمای فعلی"
 bun run build
 
 echo "=== ۳) اجرای سرور + ۲ ربات تلگرام ==="
