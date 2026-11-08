@@ -37,18 +37,19 @@ model Post {
 
 // کاربران ربات WiftoBot (شناسه تلگرام به‌صورت رشته — آیدی‌ها از Int بزرگ‌ترند)
 model BotUser {
-  id        String   @id @default(cuid())
-  tgId      String   @unique
-  firstName String?
-  username  String?
-  points    Int      @default(0)
-  lotteries Int      @default(0) // چند بار در قرعه‌کشی‌ها شرکت کرده
-  wins      Int      @default(0) // چند بار برنده شده
-  phone     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  submissions    Submission[]
-  entries        LotteryEntry[]
+  id          String    @id @default(cuid())
+  tgId        String    @unique
+  firstName   String?
+  username    String?
+  points      Int       @default(0)
+  lotteries   Int       @default(0) // چند بار در قرعه‌کشی‌ها شرکت کرده
+  wins        Int       @default(0) // چند بار برنده شده
+  phone       String?
+  lastBonusAt DateTime? // آخرین بار امتیاز شانسی گرفته (کول‌داون ۱۲ ساعته)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  submissions Submission[]
+  entries     LotteryEntry[]
 }
 
 // ماموریت‌هایی که مدیر از پنل می‌سازد

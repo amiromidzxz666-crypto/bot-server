@@ -19,6 +19,8 @@ const TG_LIMIT = 4000;
 const CARD_NO = '6219861852598258';
 const CARD_NAME = 'امیرحسین محمدزاده';
 const SUPPORT_CHANNEL = '@Notification_Wifto';
+const JOIN_CHANNEL = SUPPORT_CHANNEL; // کانال اجباری برای استفاده از ربات
+const JOIN_CHANNEL_URL = `https://t.me/${SUPPORT_CHANNEL.slice(1)}`;
 const PRICE_PER_POINT = 1000; // تومان به ازای هر امتیاز
 const BONUS_MIN_TOMAN = 30000; // بالای این مبلغ ضریب می‌گیرد
 const BONUS_FACTOR = 2;
@@ -57,6 +59,7 @@ const MAIN_KEYBOARD = {
   keyboard: [
     [{ text: '🎯 ماموریت‌ها' }],
     [{ text: '🎰 قرعه‌کشی' }],
+    [{ text: '🎁 امتیاز شانسی' }],
     [{ text: '💎 خرید امتیاز' }],
     [{ text: '👤 حساب کاربری' }, { text: '🎧 پشتیبانی' }],
   ],
@@ -72,6 +75,14 @@ const PHONE_KB = {
   ],
   resize_keyboard: true,
   one_time_keyboard: false,
+};
+
+// کیبورد عضویت اجباری کانال (دکمه شیشه‌ای)
+const JOIN_KB = {
+  inline_keyboard: [
+    [{ text: '📢 عضویت در کانال', url: JOIN_CHANNEL_URL }],
+    [{ text: '✅ تایید عضویت', callback_data: 'join_check' }],
+  ],
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -769,6 +780,67 @@ async function submitPhone(chatId: number) {
   await sendMessage(chatId, '✅ شماره‌ت ثبت شد!\n\nاینترنت به‌زودی برات فعال می‌شه 🌐🙏', MAIN_KEYBOARD);
 }
 
+// ---------- دروازه عضویت کانال ----------
+/** عضو کانال است؟ (getChatMember — ربات باید ادمین کانال باشد؛ خطای API → fail-open تا ربات قفل نشود) */
+async function isChannelMember(userId: number): Promise<boolean> {
+  const r = await tg('getChatMember', { chat_id: JOIN_CHANNEL, user_id: userId }, 1);
+  if (!r || !r.ok) {
+    log(`getChatMember پاسخ نداد (کاربر ${userId}) — دروازه باز گذاشته شد (fail-open)`);
+    return true;
+  }
+  const status = (r.result as { status?: string } | undefined)?.status ?? '';
+  return ['creator', 'administrator', 'member', 'restricted'].includes(status);
+}
+
+/** پیام عضویت اجباری — فقط وقتی نمایش داده می‌شود که کاربر عضو نباشد */
+function sendJoinPrompt(chatId: number) {
+  return sendMessage(
+    chatId,
+    `🔒 برای استفاده از ربات، اول در کانال ما عضو شو:\n\n📢 ${JOIN_CHANNEL}\n\nبعد از عضویت، دکمه «✅ تایید عضویت» را بزن 👇`,
+    JOIN_KB
+  );
+}
+
+// ---------- امتیاز شانسی (هر ۱۲ ساعت) ----------
+const BONUS_COOLDOWN_MS = 12 * 60 * 60 * 1000; // ۱۲ ساعت
+
+async function sendRandomBonus(chatId: number) {
+  const { p } = await import('./wifto-db');
+  const tgId = String(chatId);
+  const u = await p.botUser.findUnique({ where: { tgId } }).catch(() => null);
+  const now = Date.now();
+  if (u?.lastBonusAt) {
+    const elapsed = now - new Date(u.lastBonusAt).getTime();
+    if (elapsed < BONUS_COOLDOWN_MS) {
+      const remain = BONUS_COOLDOWN_MS - elapsed;
+      const h = Math.floor(remain / 3_600_000);
+      const m = Math.floor((remain % 3_600_000) / 60_000);
+      await sendMessage(
+        chatId,
+        `⏳ امتیاز شانسی رو قبلاً گرفتی! 🍀\n\n⏰ دفعه بعد: ${h > 0 ? `${h} ساعت و ` : ''}${m} دقیقه دیگه\n🕐 حدود ${faTime(new Date(now + remain))}`,
+        MAIN_KEYBOARD
+      );
+      return;
+    }
+  }
+  const win = 1 + Math.floor(Math.random() * 12); // ۱ تا ۱۲ — پوچ ندارد
+  try {
+    await p.botUser.update({
+      where: { tgId },
+      data: { lastBonusAt: new Date(), points: { increment: win } },
+    });
+  } catch (e) {
+    log(`ثبت امتیاز شانسی ناموفق: ${(e as Error).message}`);
+    await sendMessage(chatId, '⚠️ مشکلی پیش آمد — یک بار دیگه تلاش کن 🙏', MAIN_KEYBOARD);
+    return;
+  }
+  await sendMessage(
+    chatId,
+    `🍀 دکمه شانس رو زدی و...\n\n🎉 ${fmtNum(win)} امتیاز شانسی گرفتی!\n💎 امتیاز فعلی: ${fmtNum((u?.points ?? 0) + win)}\n\n⏰ دفعه بعد: ۱۲ ساعت دیگه (حدود ${faTime(new Date(now + BONUS_COOLDOWN_MS))})`,
+    MAIN_KEYBOARD
+  );
+}
+
 // ---------- پیام‌ها ----------
 async function handleMessage(msg: TgMsg) {
   const chatId = msg.chat?.id;
@@ -814,6 +886,13 @@ async function handleMessage(msg: TgMsg) {
       chatId,
       `📊 آمار ربات:\n👥 کل کاربران: ${seenUsers.size} (در دیتابیس: ${totalUsers})\n🔥 فعال ۲۴ ساعت گذشته: ${active24h}`
     );
+    return;
+  }
+
+  // ---------- دروازه عضویت کانال ----------
+  // وقتی کاربر عضو نباشد، هر دکمه/پیام → پیام عضویت (مدیر مستثناست)
+  if (chatId !== OWNER_CHAT_ID && !(await isChannelMember(chatId))) {
+    await sendJoinPrompt(chatId);
     return;
   }
 
@@ -890,6 +969,9 @@ async function handleMessage(msg: TgMsg) {
     case '🎰 قرعه‌کشی':
       await sendLotteryPage(chatId);
       return;
+    case '🎁 امتیاز شانسی':
+      await sendRandomBonus(chatId);
+      return;
     case '💎 خرید امتیاز':
       await startBuy(chatId);
       return;
@@ -927,7 +1009,26 @@ async function handleCallback(cb: TgCallback) {
   const firstName = cb.from?.first_name;
   const username = cb.from?.username;
 
+  // ---------- دروازه عضویت کانال (هر دکمه‌ای به جز «تایید عضویت» — مدیر مستثنا) ----------
+  if (data !== 'join_check' && chatId !== OWNER_CHAT_ID && !(await isChannelMember(chatId))) {
+    await answer('🔒 اول در کانال عضو شو');
+    await sendJoinPrompt(chatId);
+    return;
+  }
+
   switch (true) {
+    case data === 'join_check': {
+      // معادل دوباره زدن /start — اگر عضو بود منو می‌آید، وگرنه همان پیام عضویت
+      if (await isChannelMember(chatId)) {
+        userStates.delete(chatId);
+        await answer('✅ عضویت تایید شد!');
+        await sendMessage(chatId, WELCOME(firstName), MAIN_KEYBOARD);
+      } else {
+        await answer('هنوز عضو کانال نشدی! 😅');
+        await sendJoinPrompt(chatId);
+      }
+      return;
+    }
     case data === 'mlist':
       await answer();
       await sendMissionsList(chatId);

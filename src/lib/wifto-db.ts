@@ -19,6 +19,7 @@ export type WiftoUser = {
   lotteries: number;
   wins: number;
   phone?: string | null;
+  lastBonusAt?: Date | null; // آخرین امتیاز شانسی (کول‌داون ۱۲ ساعته)
 };
 
 /** ساخت/بروزرسانی کاربر با هر تعامل — هیچ‌وقت داده قبلی را پاک نمی‌کند */
