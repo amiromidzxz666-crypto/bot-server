@@ -362,14 +362,24 @@ async function submissionsPanel(chatId: number) {
   const subs = await p.submission.findMany({ orderBy: { createdAt: 'desc' }, take: 15 });
   const pendingCount = await p.submission.count({ where: { status: 'pending' } });
   let text = `📥 ارسالی‌ها (۱۵ مورد آخر)\n\n⏳ در انتظار بررسی: ${pendingCount}\n\nعکس‌های کاربران خودکار همین‌جا ارسال می‌شوند و زیر هر عکس دکمه تایید/لغو دارید.\n\n`;
+  const viewRows: { text: string; callback_data: string }[][] = [];
   if (!subs.length) text += `هنوز هیچ ارسالی ثبت نشده.`;
   else {
     for (const s of subs) {
       const icon = s.status === 'approved' ? '✅' : s.status === 'rejected' ? '❌' : '⏳';
       text += `${icon} ${s.type === 'purchase' ? '💎 خرید' : '🎯 ماموریت'} — ${s.userLabel.split(' — ')[0]} — ${faTime(s.createdAt)}\n`;
+      // برای ارسالی‌های در انتظار، دکمه نمایش مجدد عکس (اگر پیام عکس حذف/نرسیده باشد)
+      if (s.status === 'pending')
+        viewRows.push([
+          {
+            text: `🖼 نمایش عکس — ${s.type === 'purchase' ? '💎 خرید' : '🎯 ماموریت'} (${s.userLabel.split(' — ')[0]})`,
+            callback_data: `s_view:${s.id}`,
+          },
+        ]);
     }
   }
-  await sendMessage(chatId, text, BACK_KB);
+  if (viewRows.length) viewRows.push([{ text: '🔄 بروزرسانی لیست', callback_data: 'ps' }]);
+  await sendMessage(chatId, text, viewRows.length ? { inline_keyboard: viewRows } : BACK_KB);
 }
 
 /** بروزرسانی کپشن پیام عکس در چت مدیر بعد از تایید/لغو */
@@ -383,6 +393,75 @@ async function updateSubmissionMessage(sub: { id: string; adminMsgId?: number | 
       inline_keyboard: [[{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }]],
     },
   }).catch(() => {});
+}
+
+/** نمایش مجدد عکس یک ارسالی در چت مدیر (اگر پیام اصلی حذف شده یا نرسیده باشد)
+ *  file_id کاربر متعلق به ربات اصلی است — بایت‌ها با توکن اصلی گرفته و به API پنل آپلود می‌شود */
+async function resendSubmissionPhoto(sub: {
+  id: string;
+  photoFileId: string;
+  type: string;
+  userLabel: string;
+  missionTitle?: string | null;
+  requestedPoints?: number | null;
+  status: string;
+  awardMode?: string | null;
+  awardedPoints?: number | null;
+  phone?: string | null;
+  createdAt: Date;
+}): Promise<boolean> {
+  try {
+    const g = (await fetch(`https://api.telegram.org/bot${MAIN_TOKEN}/getFile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: sub.photoFileId }),
+      signal: AbortSignal.timeout(15_000),
+    }).then((r) => r.json())) as { ok: boolean; result?: { file_path?: string } };
+    if (!g.ok || !g.result?.file_path) {
+      log(`getFile ارسالی ${sub.id} ناموفق بود`);
+      return false;
+    }
+    const res = await fetch(`https://api.telegram.org/file/bot${MAIN_TOKEN}/${g.result.file_path}`, {
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      log(`دانلود عکس ارسالی ${sub.id}: HTTP ${res.status}`);
+      return false;
+    }
+    const bytes = await res.arrayBuffer();
+    const kb =
+      sub.status === 'pending'
+        ? {
+            inline_keyboard: [
+              [
+                { text: '✅ تایید', callback_data: `s_ok:${sub.id}` },
+                { text: '❌ لغو', callback_data: `s_no:${sub.id}` },
+              ],
+              [{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }],
+            ],
+          }
+        : { inline_keyboard: [[{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }]] };
+    const form = new FormData();
+    form.append('chat_id', String(OWNER_CHAT_ID));
+    form.append('caption', subCaption(sub).slice(0, 1024));
+    form.append('reply_markup', JSON.stringify(kb));
+    form.append('photo', new Blob([bytes], { type: 'image/jpeg' }), 'photo.jpg');
+    const up = await fetch(`${API}/sendPhoto`, { method: 'POST', body: form });
+    const data = (await up.json()) as {
+      ok: boolean;
+      result?: { message_id?: number };
+      description?: string;
+    };
+    if (data.ok && data.result?.message_id) {
+      await p.submission.update({ where: { id: sub.id }, data: { adminMsgId: data.result.message_id } });
+      return true;
+    }
+    log(`sendPhoto مجدد ارسالی ${sub.id}: ${data.description ?? '?'}`);
+    return false;
+  } catch (e) {
+    log(`خطای نمایش ارسالی ${sub.id}: ${(e as Error).message}`);
+    return false;
+  }
 }
 
 // ---------- آمار ----------
@@ -1003,6 +1082,22 @@ async function handleCallback(cb: AdminCallback) {
       await answer('پاک شد');
       const mid = cb.message?.message_id;
       if (mid) await tg('deleteMessage', { chat_id: chatId, message_id: mid }).catch(() => {});
+      return;
+    }
+    case data.startsWith('s_view:'): {
+      await answer('در حال دریافت عکس...');
+      const subId = data.slice(7);
+      const sub = await p.submission.findUnique({ where: { id: subId } });
+      if (!sub) {
+        await sendMessage(chatId, 'ارسالی پیدا نشد 🤔');
+        return;
+      }
+      const ok = await resendSubmissionPhoto(sub);
+      if (!ok)
+        await sendMessage(
+          chatId,
+          '⚠️ نمایش عکس ناموفق بود — فایل ممکن است منقضی شده باشد یا در دسترس نباشد.'
+        );
       return;
     }
 

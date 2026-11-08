@@ -129,6 +129,67 @@ async function tgAdmin(method: string, params: Record<string, unknown>, retries 
   return null;
 }
 
+/** دانلود بایت‌های فایل با توکن ربات اصلی (file_id بین ربات‌ها قابل انتقال نیست) */
+async function downloadFileBytes(filePath: string): Promise<ArrayBuffer | null> {
+  try {
+    const res = await fetch(`https://api.telegram.org/file/bot${TOKEN}/${filePath}`, {
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) {
+      log(`دانلود فایل ناموفق: HTTP ${res.status}`);
+      return null;
+    }
+    return await res.arrayBuffer();
+  } catch (e) {
+    log(`خطای دانلود فایل: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * ارسال عکس به چت مدیر از طریق ربات پنل (@HmganBot)
+ * نکته مهم: file_id دریافتی از کاربر متعلق به ربات اصلی است و ربات پنل با آن
+ * نمی‌تواند sendPhoto بزند (file_id بین ربات‌ها قابل انتقال نیست)؛ پس بایت‌های عکس
+ * با توکن اصلی دانلود و به‌صورت multipart به API پنل آپلود می‌شود.
+ */
+async function sendPhotoToPanel(
+  fileId: string,
+  caption: string,
+  replyMarkup?: object
+): Promise<{ ok: boolean; messageId?: number; error?: string }> {
+  if (!ADMIN_TOKEN) return { ok: false, error: 'TG_ADMIN_BOT_TOKEN تنظیم نشده است' };
+  const g = (await tg('getFile', { file_id: fileId })) as unknown as
+    | { result?: { file_path?: string } }
+    | null;
+  const filePath = g?.result?.file_path;
+  if (!filePath) return { ok: false, error: 'getFile ناموفق بود' };
+  const bytes = await downloadFileBytes(filePath);
+  if (!bytes) return { ok: false, error: 'دانلود بایت‌های عکس ناموفق بود' };
+  for (let i = 0; i <= 3; i++) {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(OWNER_CHAT_ID));
+      form.append('caption', caption.slice(0, 1024));
+      if (replyMarkup) form.append('reply_markup', JSON.stringify(replyMarkup));
+      form.append('photo', new Blob([bytes], { type: 'image/jpeg' }), 'photo.jpg');
+      const res = await fetch(`${ADMIN_API}/sendPhoto`, { method: 'POST', body: form });
+      const data = (await res.json()) as {
+        ok: boolean;
+        result?: { message_id?: number };
+        description?: string;
+      };
+      if (data.ok) return { ok: true, messageId: data.result?.message_id };
+      log(`خطای ارسال عکس به پنل (sendPhoto): ${data.description ?? '?'}`);
+      return { ok: false, error: data.description ?? 'sendPhoto ناموفق بود' };
+    } catch (e) {
+      log(`خطای شبکه ارسال عکس به پنل (تلاش ${i + 1}): ${(e as Error).message}`);
+      if (i < 3) await sleep(1500 * (i + 1));
+      else return { ok: false, error: (e as Error).message };
+    }
+  }
+  return { ok: false, error: 'نامشخص' };
+}
+
 async function sendMessage(chatId: number, text: string, replyMarkup?: object) {
   const chunks: string[] = [];
   let rest = String(text);
@@ -349,32 +410,38 @@ async function submitMissionPhoto(chatId: number, firstName?: string, username?:
       photoFileId: st.fileId,
     },
   });
-  // ارسال عکس به پنل مدیر از طریق ربات پنل
-  const sent = await tgAdmin(
-    'sendPhoto',
+  // ارسال عکس به پنل مدیر (آپلود بایت‌ها — file_id بین ربات‌ها قابل انتقال نیست)
+  const sent = await sendPhotoToPanel(
+    st.fileId,
+    `📥 ارسالی جدید — 🎯 ماموریت\n\n` +
+      `👤 کاربر: ${label}\n` +
+      `🎯 ماموریت: ${m.title}\n` +
+      `🎁 پاداش پیشنهادی: ${rewardText(m)}\n` +
+      `⏰ ${faTime(new Date())}`,
     {
-      chat_id: OWNER_CHAT_ID,
-      photo: st.fileId,
-      caption:
-        `📥 ارسالی جدید — 🎯 ماموریت\n\n` +
-        `👤 کاربر: ${label}\n` +
-        `🎯 ماموریت: ${m.title}\n` +
-        `🎁 پاداش پیشنهادی: ${rewardText(m)}\n` +
-        `⏰ ${faTime(new Date())}`,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '✅ تایید', callback_data: `s_ok:${sub.id}` },
-            { text: '❌ لغو', callback_data: `s_no:${sub.id}` },
-          ],
-          [{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }],
+      inline_keyboard: [
+        [
+          { text: '✅ تایید', callback_data: `s_ok:${sub.id}` },
+          { text: '❌ لغو', callback_data: `s_no:${sub.id}` },
         ],
-      },
-    },
-    3
+        [{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }],
+      ],
+    }
   );
-  if (sent?.result?.message_id) {
-    await p.submission.update({ where: { id: sub.id }, data: { adminMsgId: sent.result.message_id } });
+  if (sent.ok && sent.messageId) {
+    await p.submission.update({ where: { id: sub.id }, data: { adminMsgId: sent.messageId } });
+  } else {
+    // ارسال به پنل شکست خورد — رکورد بی‌عکس در لیست پنل نماند؛ کاربر دوباره تلاش می‌کند
+    await p.submission
+      .update({ where: { id: sub.id }, data: { status: 'error', resolvedAt: new Date() } })
+      .catch(() => {});
+    log(`ارسال عکس ماموریت به پنل ناموفق: ${sent.error} — کاربر باید دوباره تلاش کند`);
+    await sendMessage(
+      chatId,
+      '⚠️ ارسال به پشتیبانی موقتاً ناموفق بود!\n\nچند لحظه بعد دوباره از منوی ماموریت‌ها تلاش کن 🙏',
+      MAIN_KEYBOARD
+    );
+    return;
   }
   userStates.delete(chatId);
   await sendMessage(
@@ -546,31 +613,37 @@ async function submitPurchaseReceipt(chatId: number, firstName?: string, usernam
       requestedPoints: st.points,
     },
   });
-  const sent = await tgAdmin(
-    'sendPhoto',
+  // ارسال رسید به پنل مدیر (آپلود بایت‌ها — file_id بین ربات‌ها قابل انتقال نیست)
+  const sent = await sendPhotoToPanel(
+    st.fileId,
+    `📥 ارسالی جدید — 💎 خرید امتیاز\n\n` +
+      `👤 کاربر: ${label}\n` +
+      `💎 امتیاز درخواستی: ${fmtNum(st.points)}\n` +
+      `💳 مبلغ: ${fmtNum(st.toman)} تومان\n` +
+      `⏰ ${faTime(new Date())}`,
     {
-      chat_id: OWNER_CHAT_ID,
-      photo: st.fileId,
-      caption:
-        `📥 ارسالی جدید — 💎 خرید امتیاز\n\n` +
-        `👤 کاربر: ${label}\n` +
-        `💎 امتیاز درخواستی: ${fmtNum(st.points)}\n` +
-        `💳 مبلغ: ${fmtNum(st.toman)} تومان\n` +
-        `⏰ ${faTime(new Date())}`,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '✅ تایید', callback_data: `s_ok:${sub.id}` },
-            { text: '❌ لغو', callback_data: `s_no:${sub.id}` },
-          ],
-          [{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }],
+      inline_keyboard: [
+        [
+          { text: '✅ تایید', callback_data: `s_ok:${sub.id}` },
+          { text: '❌ لغو', callback_data: `s_no:${sub.id}` },
         ],
-      },
-    },
-    3
+        [{ text: '🗑 پاک کردن', callback_data: `s_del:${sub.id}` }],
+      ],
+    }
   );
-  if (sent?.result?.message_id) {
-    await p.submission.update({ where: { id: sub.id }, data: { adminMsgId: sent.result.message_id } });
+  if (sent.ok && sent.messageId) {
+    await p.submission.update({ where: { id: sub.id }, data: { adminMsgId: sent.messageId } });
+  } else {
+    await p.submission
+      .update({ where: { id: sub.id }, data: { status: 'error', resolvedAt: new Date() } })
+      .catch(() => {});
+    log(`ارسال رسید خرید به پنل ناموفق: ${sent.error} — کاربر باید دوباره تلاش کند`);
+    await sendMessage(
+      chatId,
+      '⚠️ ارسال رسید موقتاً ناموفق بود!\n\nچند لحظه بعد دوباره از منوی خرید امتیاز تلاش کن 🙏',
+      MAIN_KEYBOARD
+    );
+    return;
   }
   userStates.delete(chatId);
   await sendMessage(
