@@ -22,7 +22,8 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # نسخه پین‌شده — «latest» به 1.4.4 اشاره می‌کرد که دانلودش 504 می‌دهد
+          bun-version: "1.3.14"
 
       - name: Run bots (self-chaining 24/7)
         env:
