@@ -1,0 +1,45 @@
+name: bots
+
+on:
+  workflow_dispatch:
+  schedule:
+    # پشتیبانِ زنجیره — اگر ران فعال باشد گارد dedup آن را بلافاصله بست می‌کند
+    - cron: "37 */6 * * *"
+
+concurrency:
+  group: bots-runtime
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 295
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Run bots (self-chaining 24/7)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TG_MAIN_BOT_TOKEN: ${{ secrets.TG_MAIN_BOT_TOKEN }}
+          TG_ADMIN_BOT_TOKEN: ${{ secrets.TG_ADMIN_BOT_TOKEN }}
+          RUBIKA_BOT_TOKEN: ${{ secrets.RUBIKA_BOT_TOKEN }}
+          SOROUSH_BOT_TOKEN: ${{ secrets.SOROUSH_BOT_TOKEN }}
+          OWNER_TG_CHAT_ID: ${{ secrets.OWNER_TG_CHAT_ID }}
+          SOROUSH_OWNER_USERNAME: ${{ secrets.SOROUSH_OWNER_USERNAME }}
+          SOROUSH_OWNER_CHAT_ID: ${{ secrets.SOROUSH_OWNER_CHAT_ID }}
+          RUBIKA_OWNER_CHAT_ID: ${{ secrets.RUBIKA_OWNER_CHAT_ID }}
+          RUBIKA_OWNER_USER_ID: ${{ secrets.RUBIKA_OWNER_USER_ID }}
+          ZAI_CONFIG: ${{ secrets.ZAI_CONFIG }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          # فقط دو ربات تلگرام (چت‌بات + پیام همگانی) — روبیکا/سروش استارت نمی‌شوند
+          BOTS_ENABLED: "tg,admin"
+        run: |
+          printf '%s' "$ZAI_CONFIG" > "$HOME/.z-ai-config"
+          bash runner.sh

@@ -1,0 +1,6 @@
+node_modules
+.next
+db
+*.log
+.git
+.hf-deploy-local
