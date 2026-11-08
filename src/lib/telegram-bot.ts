@@ -64,6 +64,16 @@ const MAIN_KEYBOARD = {
   is_persistent: true,
 };
 
+// کیبورد ارسال شماره تلفن (دکمه request_contact — کاربر فقط لمس می‌کند و تلگرام شماره را می‌فرستد)
+const PHONE_KB = {
+  keyboard: [
+    [{ text: '📱 ارسال شماره تلفن', request_contact: true }],
+    [{ text: 'انصراف' }],
+  ],
+  resize_keyboard: true,
+  one_time_keyboard: false,
+};
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (m: string) => console.log(`[TG-BOT] ${new Date().toISOString()} ${m}`);
 
@@ -688,20 +698,34 @@ export function beginPhoneFlow(chatId: number) {
   userStates.set(chatId, { kind: 'phone' });
   sendMessage(
     chatId,
-    `✅ ماموریت شما تایید شد! 🎉\n\n🌐 برای اینکه اینترنت را برای شما فعال کنیم، شماره تلفن خود را ارسال کنید 📱`,
-    MAIN_KEYBOARD
+    `🎉 پاداش اینترنت شما تایید شد!\n\n🌐 برای فعال‌سازی اینترنت رایگان، با دکمه زیر شماره تلفن خود را ارسال کنید 👇\n\n(یا شماره را به صورت متن بنویس، مثلاً 09123456789)`,
+    PHONE_KB
   ).catch(() => {});
+}
+
+/** آیا متن شبیه شماره تلفن است؟ — تا دکمه‌های منو در حالت phone مسدود نشوند */
+function looksLikePhone(s: string): boolean {
+  const en = toEnDigits(s).replace(/[\s\-().]/g, '');
+  return /^\+?\d{10,14}$/.test(en);
 }
 
 async function handlePhoneInput(chatId: number, rawPhone: string) {
   const digits = toEnDigits(rawPhone).replace(/[^\d+]/g, '');
-  const onlyDigits = digits.replace(/\D/g, '');
+  let onlyDigits = digits.replace(/\D/g, '');
+  if (onlyDigits.startsWith('98') && onlyDigits.length === 12) onlyDigits = `0${onlyDigits.slice(2)}`; // 98912… → 0912…
   if (onlyDigits.length < 10 || onlyDigits.length > 14) {
-    await sendMessage(chatId, '📱 شماره تلفن معتبر بفرست (مثلاً 09123456789):');
+    await sendMessage(
+      chatId,
+      '📱 شماره معتبر نیست — با دکمه «📱 ارسال شماره تلفن» بفرست، یا به صورت متن بنویس (مثلاً 09123456789):'
+    );
     return;
   }
-  const st = userStates.get(chatId);
-  if (st?.kind === 'phone') st.phone = onlyDigits;
+  let st = userStates.get(chatId);
+  if (st?.kind !== 'phone') {
+    st = { kind: 'phone' };
+    userStates.set(chatId, st);
+  }
+  st.phone = onlyDigits;
   await sendMessage(
     chatId,
     `📞 شماره شما:\n${onlyDigits}\n\nاین شماره برای فعال‌سازی اینترنت به پشتیبانی ارسال شود؟`,
@@ -815,13 +839,10 @@ async function handleMessage(msg: TgMsg) {
     return;
   }
 
-  // ---------- شماره تماس (اشتراک مخاطب) ----------
+  // ---------- شماره تماس (اشتراک مخاطب — دکمه request_contact) ----------
   if (msg.contact?.phone_number) {
-    const st = userStates.get(chatId);
-    if (st?.kind === 'phone') {
-      await handlePhoneInput(chatId, msg.contact.phone_number);
-      return;
-    }
+    await handlePhoneInput(chatId, msg.contact.phone_number);
+    return;
   }
 
   if (text === '/start' || text === '/help') {
@@ -839,7 +860,7 @@ async function handleMessage(msg: TgMsg) {
   const st = userStates.get(chatId);
 
   // ---------- جریان‌های فعال ----------
-  if (st?.kind === 'phone' && text) {
+  if (st?.kind === 'phone' && text && looksLikePhone(text)) {
     await handlePhoneInput(chatId, text);
     return;
   }

@@ -736,7 +736,8 @@ async function resolveAward(
       where: { id: subId },
       data: { status: 'approved', awardMode: 'internet', resolvedAt: new Date() },
     });
-    notify = `✅ ماموریت شما تایید شد! 🎉\n\nبرای اینکه اینترنت را برای شما فعال کنیم، شماره تلفن خود را ارسال کنید 📱`;
+    // درخواست شماره با دکمه مخصوص (request_contact) جداگانه از ربات اصلی می‌آید — اینجا فقط تایید
+    notify = `✅ ماموریت شما تایید شد! 🎉`;
   } else {
     const n = points ?? 0;
     await p.submission.update({
