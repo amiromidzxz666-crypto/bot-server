@@ -97,7 +97,7 @@ model Lottery {
   entries    LotteryEntry[]
 }
 
-// شرکت‌کنندگان قرعه‌کشی — امتیاز لحظه شرکت قفل می‌شود
+// شرکت‌کنندگان قرعه‌کشی — با هر «افزودن»، امتیاز جدید به همین رکورد اضافه می‌شود (نامحدود)
 model LotteryEntry {
   id        String   @id @default(cuid())
   lotteryId String

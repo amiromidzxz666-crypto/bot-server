@@ -486,21 +486,34 @@ async function sendLotteryPage(chatId: number) {
     await sendMessage(chatId, NO_LOTTERY, MAIN_KEYBOARD);
     return;
   }
-  const entries = await p.lotteryEntry.findMany({ where: { lotteryId: lot.id } });
   const u = await getUserByTg(String(chatId));
-  const total = entries.reduce((s, e) => s + e.points, 0);
-  const joined = entries.some((e) => e.userTgId === String(chatId));
-  let text =
-    `🎰 قرعه‌کشی فعال!\n\n${lot.title}\n\n` +
-    `🎟 شرکت‌کنندگان: ${fmtNum(entries.length)} نفر\n` +
-    `💎 مجموع امتیازهای قرعه‌کشی: ${fmtNum(total)}\n\n` +
-    `هر کی امتیاز بیشتری داشته باشه، شانس برنده شدنش بیشتره! 🍀\n\n` +
-    `💎 امتیاز فعلی شما: ${fmtNum(u?.points ?? 0)}\n`;
-  if (joined) {
-    text += '\n✅ شما در این قرعه‌کشی ثبت‌نام کرده‌اید!\nبا انجام ماموریت‌های فعال می‌تونی برای قرعه‌کشی‌های بعدی دوباره امتیاز جمع کنی 🎯';
-    await sendMessage(chatId, text, MAIN_KEYBOARD);
+  const myEntry = await p.lotteryEntry.findUnique({
+    where: { lotteryId_userTgId: { lotteryId: lot.id, userTgId: String(chatId) } },
+  });
+  // توجه: تعداد شرکت‌کنندگان و مجموع امتیازهای بقیه نمایش داده نمی‌شود (درخواست مدیر)
+  if (myEntry) {
+    // کاربر قبلاً شرکت کرده — می‌تواند نامحدود امتیاز جدید به شرکتش اضافه کند
+    const balance = u?.points ?? 0;
+    let text =
+      `🎰 قرعه‌کشی فعال!\n\n${lot.title}\n\n` +
+      `✅ شما در این قرعه‌کشی ثبت‌نام کرده‌اید!\n` +
+      `💎 امتیاز ثبت‌شده شما در قرعه‌کشی: ${fmtNum(myEntry.points)}\n` +
+      `💎 امتیاز فعلی حسابت: ${fmtNum(balance)}\n\n`;
+    if (balance >= 1) {
+      text += `می‌تونی با انجام ماموریت‌ها یا امتیاز شانسی امتیاز جمع کنی و دوباره به شانس‌ت اضافه کنی 🍀`;
+      await sendMessage(chatId, text, {
+        inline_keyboard: [[{ text: '➕ افزودن امتیاز به قرعه‌کشی', callback_data: 'lot_join' }]],
+      });
+    } else {
+      text += `با انجام ماموریت‌ها یا امتیاز شانسی امتیاز جمع کن، بعد دوباره بیا تا به شانس‌ت اضافه کنی 🎯`;
+      await sendMessage(chatId, text, MAIN_KEYBOARD);
+    }
     return;
   }
+  const text =
+    `🎰 قرعه‌کشی فعال!\n\n${lot.title}\n\n` +
+    `هر کی امتیاز بیشتری داشته باشه، شانس برنده شدنش بیشتره! 🍀\n\n` +
+    `💎 امتیاز فعلی شما: ${fmtNum(u?.points ?? 0)}\n`;
   await sendMessage(chatId, text, {
     inline_keyboard: [[{ text: '🎟 شرکت در قرعه‌کشی', callback_data: 'lot_join' }]],
   });
@@ -519,7 +532,7 @@ async function askLotteryJoin(chatId: number) {
   if (!u || u.points < 1) {
     await sendMessage(
       chatId,
-      '💎 برای شرکت در قرعه‌کشی حداقل ۱ امتیاز لازم است!\n\nبا انجام ماموریت‌های فعال امتیاز جمع کن بعد بیا 🎯',
+      '💎 برای شرکت در قرعه‌کشی حداقل ۱ امتیاز لازم است!\n\nبا انجام ماموریت‌های فعال یا امتیاز شانسی امتیاز جمع کن بعد بیا 🎯',
       MAIN_KEYBOARD
     );
     return;
@@ -528,7 +541,23 @@ async function askLotteryJoin(chatId: number) {
     where: { lotteryId_userTgId: { lotteryId: lot.id, userTgId: tgId } },
   });
   if (already) {
-    await sendMessage(chatId, '✅ شما قبلاً در این قرعه‌کشی شرکت کرده‌اید 🍀', MAIN_KEYBOARD);
+    // افزودن نامحدود — امتیاز جدید به شرکت قبلی اضافه می‌شود (نه بلاک)
+    await sendMessage(
+      chatId,
+      `➕ افزودن امتیاز به قرعه‌کشی\n\n` +
+        `💎 امتیاز ثبت‌شده شما تا الان: ${fmtNum(already.points)}\n` +
+        `💎 امتیاز فعلی حسابت: ${fmtNum(u.points)}\n\n` +
+        `با تایید، همه امتیازت به شرکت قبلیت اضافه می‌شه و حسابت صفر می‌شه.\n\n` +
+        `(نامحدود است — هر وقت امتیاز جدید گرفتی می‌تونی دوباره اضافه کنی)\n\nمطمئنی؟`,
+      {
+        inline_keyboard: [
+          [
+            { text: '✅ تایید و افزودن', callback_data: 'lot_yes' },
+            { text: '❌ انصراف', callback_data: 'xst' },
+          ],
+        ],
+      }
+    );
     return;
   }
   await sendMessage(
@@ -562,10 +591,20 @@ async function confirmLotteryJoin(chatId: number) {
     where: { lotteryId_userTgId: { lotteryId: lot.id, userTgId: tgId } },
   });
   if (already) {
-    await sendMessage(chatId, '✅ شما قبلاً در این قرعه‌کشی شرکت کرده‌اید 🍀', MAIN_KEYBOARD);
+    // افزودن نامحدود — امتیاز جدید به رکورد شرکت قبلی اضافه می‌شود (شرکت جدید محسوب نمی‌شود)
+    const pts = u.points;
+    await p.$transaction([
+      p.botUser.update({ where: { tgId }, data: { points: { decrement: pts } } }),
+      p.lotteryEntry.update({ where: { id: already.id }, data: { points: { increment: pts } } }),
+    ]);
+    await sendMessage(
+      chatId,
+      `✅ ${fmtNum(pts)} امتیاز جدید به شرکتت در قرعه‌کشی اضافه شد! 🍀\n\n💎 مجموع امتیاز ثبت‌شده شما: ${fmtNum(already.points + pts)}\n\nهر وقت دوباره امتیاز گرفتی می‌تونی به همین شکل اضافه کنی 🎯`,
+      MAIN_KEYBOARD
+    );
     return;
   }
-  // امتیازها قفل می‌شوند
+  // شرکت اول — امتیازها قفل می‌شوند
   const pts = u.points;
   await p.$transaction([
     p.botUser.update({ where: { tgId }, data: { points: { decrement: pts }, lotteries: { increment: 1 } } }),
@@ -573,7 +612,7 @@ async function confirmLotteryJoin(chatId: number) {
   ]);
   await sendMessage(
     chatId,
-    `✅ شرکتت در قرعه‌کشی ثبت شد! 🍀\n\n💎 ${fmtNum(pts)} امتیازت وارد قرعه‌کشی شد.\n\nمی‌تونی با انجام ماموریت‌های فعال دوباره امتیاز جمع کنی 🎯`,
+    `✅ شرکتت در قرعه‌کشی ثبت شد! 🍀\n\n💎 ${fmtNum(pts)} امتیازت وارد قرعه‌کشی شد.\n\nمی‌تونی با انجام ماموریت‌ها یا امتیاز شانسی دوباره امتیاز جمع کنی و به همین شرکت اضافه کنی 🎯`,
     MAIN_KEYBOARD
   );
 }
